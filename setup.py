@@ -8,6 +8,8 @@ import torch
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, include_paths, CppExtension
 import os
 
+is_windows = sys.platform == 'win32'
+
 try:
     version = (
         subprocess.check_output(["git", "describe", "--abbrev=0", "--tags"])
@@ -58,5 +60,5 @@ if __name__ == "__main__":
             'build_ext': BuildExtension.with_options(no_python_abi_suffix=True, use_ninja=False)},
         include_package_data=True,
         entry_points={"console_scripts": ["torchmd-train = torchmdnet.scripts.train:main"]},
-        package_data={"torchmdnet": ["extensions/torchmdnet_extensions.so"]},
+        package_data={"torchmdnet": ["extensions/torchmdnet_extensions.so"] if not is_windows else ["extensions/torchmdnet_extensions.dll"]},
     )
