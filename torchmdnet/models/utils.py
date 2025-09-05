@@ -255,8 +255,13 @@ class OptimizedDistance(torch.nn.Module):
         use_periodic = self.use_periodic
         if not use_periodic:
             use_periodic = box is not None
-        box = self.box if box is None else box
-        assert box is not None, "Box must be provided"
+
+        if use_periodic:
+            box = self.box if box is None else box
+        else:
+            box = torch.empty((0,0), device=pos.device)
+
+        
         box = box.to(pos.dtype)
         max_pairs: int = self.max_num_pairs
         if self.max_num_pairs < 0:

@@ -15,6 +15,7 @@ from torchmdnet.models.utils import (
 from torchmdnet.utils import atomic_masses
 from torchmdnet.extensions import is_current_stream_capturing
 from warnings import warn
+from torch._dynamo.exc import Unsupported
 
 __all__ = ["Scalar", "DipoleMoment", "ElectronicSpatialExtent"]
 
@@ -31,6 +32,11 @@ class OutputModel(nn.Module, metaclass=ABCMeta):
         self.allow_prior_model = allow_prior_model
         self.reduce_op = reduce_op
         self.dim_size = 0
+        self.inference_mode = False
+
+    def setup_for_inference(self, batch_size: int):
+        self.dim_size = int(batch_size)
+        self.inference_mode = True
 
     def reset_parameters(self):
         pass
@@ -40,18 +46,24 @@ class OutputModel(nn.Module, metaclass=ABCMeta):
         return
 
     def reduce(self, x, batch):
-        is_capturing = x.is_cuda and is_current_stream_capturing()
-        if not x.is_cuda or not is_capturing:
-            self.dim_size = int(batch.max().item() + 1)
-        if is_capturing:
-            assert (
-                self.dim_size > 0
-            ), "Warming up is needed before capturing the model into a CUDA graph"
-            warn(
-                "CUDA graph capture will lock the batch to the current number of samples ({}). Changing this will result in a crash".format(
-                    self.dim_size
+        if torch.compiler.is_compiling():
+            if not self.inference_mode:
+                raise Unsupported(reason="To capture the full graph with torch.compile you must first lock in the batch size with model.output_model.setup_for_inference(batch_size)"
                 )
-            )
+
+        if not self.inference_mode:
+            is_capturing = x.is_cuda and is_current_stream_capturing()
+            if not x.is_cuda or not is_capturing:
+                self.dim_size = int(batch.max().item() + 1)
+            if is_capturing:
+                assert (
+                    self.dim_size > 0
+                ), "Warming up is needed before capturing the model into a CUDA graph"
+                warn(
+                    "CUDA graph capture will lock the batch to the current number of samples ({}). Changing this will result in a crash".format(
+                        self.dim_size
+                    )
+                )
         return scatter(x, batch, dim=0, dim_size=self.dim_size, reduce=self.reduce_op)
 
     def post_reduce(self, x):

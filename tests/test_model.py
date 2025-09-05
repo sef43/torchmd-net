@@ -161,6 +161,64 @@ def test_cuda_graph_compatible(model_name):
     assert torch.allclose(neg_dy, neg_dy2, atol=1e-5, rtol=1e-5)
 
 
+
+# Currently only tensornet is CUDA graph compatible
+@mark.parametrize("model_name", ["tensornet"])
+def test_compile_and_cuda_graph_compatible(model_name):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    z, pos, batch = create_example_batch()
+    args = {
+        "model": model_name,
+        "embedding_dimension": 128,
+        "num_layers": 2,
+        "num_rbf": 32,
+        "rbf_type": "expnorm",
+        "trainable_rbf": False,
+        "activation": "silu",
+        "cutoff_lower": 0.0,
+        "cutoff_upper": 5.0,
+        "max_z": 100,
+        "max_num_neighbors": 128,
+        "equivariance_invariance_group": "O(3)",
+        "prior_model": None,
+        "atom_filter": -1,
+        "derivative": False,
+        "check_errors": False,
+        "static_shapes": True,
+        "output_model": "Scalar",
+        "reduce_op": "sum",
+        "precision": 32,
+    }
+    model = create_model(args).to(device="cuda")
+    model.eval()
+    z = z.to("cuda")
+    pos = pos.to("cuda").requires_grad_(True)
+    batch = batch.to("cuda")
+
+    # compute 
+    y_ref, _ = model(z, pos, batch=batch)
+    y_ref.backward(torch.ones_like(y_ref))
+    neg_dy_ref = - pos.grad
+
+
+    # setup inference mode with the batch size
+    model.output_model.setup_for_inference( int(max(batch)+1) )
+
+    # compile with cudagraph settings
+    model = torch.compile(model, options={"triton.cudagraphs": True}, fullgraph=True)
+
+    for _ in range(0, 15):
+        _pos = pos.detach().clone().requires_grad_(True)
+        y, _ = model(z, _pos, batch=batch)
+        y.backward(torch.ones_like(y))
+        neg_dy = -_pos.grad
+
+
+    assert torch.allclose(y, y_ref)
+    assert torch.allclose(neg_dy, neg_dy_ref, atol=1e-5, rtol=1e-5)
+
+
 @mark.parametrize("model_name", models.__all_models__)
 def test_seed(model_name):
     args = load_example_args(model_name, remove_prior=True)
@@ -284,3 +342,4 @@ def test_ensemble():
     assert neg_dy_std.shape == deriv.shape
     assert (y_std == 0).all()
     assert (neg_dy_std == 0).all()
+
