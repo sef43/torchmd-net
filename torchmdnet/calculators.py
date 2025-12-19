@@ -5,6 +5,7 @@
 import torch
 from torchmdnet.models.model import load_model
 import warnings
+import numpy as np
 
 # dict of preset transforms
 tranforms = {
@@ -291,3 +292,120 @@ class TMDNETCalculator(ase_calc.Calculator):
         self.results["energy"] = energy.detach().cpu().item()
         self.results["forces"] = forces.detach().cpu().numpy()
         self.evals +=1 
+
+
+def optimize_geometries(model, z, pos, batch, q, interations=10):
+    """ function to opmize geometries using torch.optim"""
+
+    pos = pos.clone().detach().requires_grad_(True)
+    optimizer = torch.optim.LBFGS([pos])
+
+    energies = []
+
+    def closure():
+        optimizer.zero_grad()
+        energy,_ = model(z, pos, batch,q=q)
+
+        energies.append(energy.detach().cpu().numpy())
+
+        energy = energy.sum()
+        energy.backward()
+
+        return energy
+
+    for i in range(interations):
+        optimizer.step(closure)
+
+    energies = np.array(energies).squeeze(-1)
+
+    return pos.detach().cpu().numpy(), energies
+
+
+# Integration functions copied from TorchMD and modified for batch use
+
+TIMEFACTOR = 48.88821
+BOLTZMAN = 0.001987191
+PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
+
+def _first_VV(pos, vel, force, mass, dt):
+    accel = force / mass
+    pos += vel * dt + 0.5 * accel * dt * dt
+    vel += 0.5 * dt * accel
+
+
+def _second_VV(vel, force, mass, dt):
+    accel = force / mass
+    vel += 0.5 * dt * accel
+
+
+def langevin(vel, gamma, coeff, dt, device):
+    csi = torch.randn_like(vel, device=device) * coeff
+    vel += -gamma * vel * dt + csi
+
+
+def batched_kinetic_energy(masses, vel, batch):
+    v_sq = torch.sum(vel ** 2, dim=1)
+    E_per_node = 0.5 * masses.squeeze(-1) * v_sq
+    n_batch = int(torch.max(batch).item()+1)
+    Ekin = torch.zeros(n_batch, device=vel.device, dtype=vel.dtype).index_add(0, batch, E_per_node)
+    return Ekin
+
+
+def batched_kinetic_to_temp(Ekin, natoms):
+    return 2.0 / (3.0 * natoms * BOLTZMAN) * Ekin
+
+
+def kinetic_to_temp(Ekin, natoms):
+    return 2.0 / (3.0 * natoms * BOLTZMAN) * Ekin
+
+
+class BatchedMLIPIntegrator:
+    """Batched Integrator for MLIP systems
+
+        modified from https://github.com/torchmd/torchmd
+    """
+    def __init__(self, model_file_path, z, pos, masses, batch, q, timestep, device='cuda', gamma=None, T=None):
+
+        # load the AceFF model
+        self.model = load_model(model_file_path, derivative=True, check_errors=True, static_shapes=False, max_num_neighbors=64, remove_ref_energy=True)
+        for parameter in self.model.parameters():
+            parameter.requires_grad = False
+        self.model.to(device)
+        self.z = z
+        self.M = masses.unsqueeze(-1)
+        self.pos = pos
+        self.batch = batch
+        self.q = q
+        self.box = None
+        self.device=device
+        self.dt = timestep / TIMEFACTOR
+        gamma = gamma / PICOSEC2TIMEU
+        self.gamma = gamma
+        self.T = T
+        if T:
+            self.vcoeff = torch.sqrt(2.0 * gamma / self.M * BOLTZMAN * T * self.dt).to(
+                device
+            )
+        self.vel = torch.zeros_like(pos)
+        self.forces = torch.zeros_like(pos)
+        self.n_atoms_per_batch = torch.bincount(batch)
+        print(self.n_atoms_per_batch)
+
+    def step(self, niter=1):
+        for _ in range(niter):
+            _first_VV(self.pos, self.vel, self.forces, self.M, self.dt)
+
+            _pos = self.pos.clone().requires_grad_(True)
+            pot, f = self.model(self.z, _pos, self.batch, q=self.q)
+
+            self.forces = f.clone().detach()
+            
+            if self.T:
+                langevin(self.vel, self.gamma, self.vcoeff, self.dt, self.device)
+            _second_VV(self.vel, self.forces, self.M, self.dt)
+
+        Ekin = batched_kinetic_energy(self.M, self.vel, self.batch)
+        T = kinetic_to_temp(Ekin, self.n_atoms_per_batch)
+
+        return Ekin.detach().cpu().numpy(), pot.detach().squeeze(-1).cpu().numpy(), T.detach().cpu().numpy()
+

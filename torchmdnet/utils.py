@@ -415,3 +415,69 @@ def check_logs(log_dir):
         bckp_date = f'{time.strftime("%Y%m%d")}-{time.strftime("%H%M%S")}'
         os.rename(metr_file_path, metr_file_path.replace(".csv", f"_{bckp_date}.csv"))
     return
+
+
+def mols_to_batch(mols, device='cuda'):
+    """helper functions to convert a group of rdkit molecules,
+        maybe with multiple conformers each, into a torchmd-net style batch.
+    
+    """
+    z_list = []
+    pos_list = []
+    m_list = []
+    batch_list = []
+    mol_conformer_idx = 0
+
+    charges = []
+    
+    for mol in mols:
+        total_charge = sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
+        atom_nums = torch.tensor(
+            [atom.GetAtomicNum() for atom in mol.GetAtoms()], dtype=torch.long
+        )
+        masses = torch.tensor(
+            [atom.GetMass() for atom in mol.GetAtoms()], dtype=torch.long
+        )
+        num_atoms = atom_nums.shape[0]
+        for conf in mol.GetConformers():
+            pos = torch.tensor(conf.GetPositions(), dtype=torch.float)  # (n_atoms, 3)
+            z_list.append(atom_nums)
+            pos_list.append(pos)
+            m_list.append(masses)
+            batch_list.append(torch.full((num_atoms,), mol_conformer_idx, dtype=torch.long))
+            mol_conformer_idx += 1
+
+            charges.append(torch.tensor(total_charge))
+            
+    z = torch.cat(z_list, dim=0).to(device)
+    pos = torch.cat(pos_list, dim=0).to(device)
+    m = torch.cat(m_list, dim=0).to(device)
+    batch = torch.cat(batch_list, dim=0).to(device)
+    q = torch.stack(charges,dim=0).to(device)
+    return z, pos, m, batch, q
+
+
+def batch_to_mols(z, pos, batch, energy_trajectories, mols):
+    """Helper funcition to assign new positions to the RDKit mols"""
+
+    from rdkit.Geometry import Point3D
+
+    counter = 0
+    energies_per_mol = []
+    for mol in mols:
+        start = counter
+        for conf in mol.GetConformers():
+            indexes = batch.detach().cpu().numpy() == counter
+            new_pos = pos[indexes]
+
+            for i in range(mol.GetNumAtoms()):
+                x,y,z = new_pos[i]
+                conf.SetAtomPosition(i,Point3D(float(x),float(y),float(z)))
+            
+            counter += 1
+        
+        end = counter
+        energies_per_mol.append(energy_trajectories[:,start:end])
+    
+    
+    return mols, energies_per_mol
