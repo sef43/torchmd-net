@@ -417,10 +417,10 @@ def check_logs(log_dir):
     return
 
 
-def mols_to_batch(mols, device='cuda'):
+def mols_to_batch(mols, device="cuda"):
     """helper functions to convert a group of rdkit molecules,
-        maybe with multiple conformers each, into a torchmd-net style batch.
-    
+    maybe with multiple conformers each, into a torchmd-net style batch.
+
     """
     z_list = []
     pos_list = []
@@ -429,7 +429,7 @@ def mols_to_batch(mols, device='cuda'):
     mol_conformer_idx = 0
 
     charges = []
-    
+
     for mol in mols:
         total_charge = sum(atom.GetFormalCharge() for atom in mol.GetAtoms())
         atom_nums = torch.tensor(
@@ -444,16 +444,18 @@ def mols_to_batch(mols, device='cuda'):
             z_list.append(atom_nums)
             pos_list.append(pos)
             m_list.append(masses)
-            batch_list.append(torch.full((num_atoms,), mol_conformer_idx, dtype=torch.long))
+            batch_list.append(
+                torch.full((num_atoms,), mol_conformer_idx, dtype=torch.long)
+            )
             mol_conformer_idx += 1
 
             charges.append(torch.tensor(total_charge))
-            
+
     z = torch.cat(z_list, dim=0).to(device)
     pos = torch.cat(pos_list, dim=0).to(device)
     m = torch.cat(m_list, dim=0).to(device)
     batch = torch.cat(batch_list, dim=0).to(device)
-    q = torch.stack(charges,dim=0).to(device)
+    q = torch.stack(charges, dim=0).to(device)
     return z, pos, m, batch, q
 
 
@@ -471,13 +473,12 @@ def batch_to_mols(z, pos, batch, energy_trajectories, mols):
             new_pos = pos[indexes]
 
             for i in range(mol.GetNumAtoms()):
-                x,y,z = new_pos[i]
-                conf.SetAtomPosition(i,Point3D(float(x),float(y),float(z)))
-            
+                x, y, z = new_pos[i]
+                conf.SetAtomPosition(i, Point3D(float(x), float(y), float(z)))
+
             counter += 1
-        
+
         end = counter
-        energies_per_mol.append(energy_trajectories[:,start:end])
-    
-    
+        energies_per_mol.append(energy_trajectories[:, start:end])
+
     return mols, energies_per_mol

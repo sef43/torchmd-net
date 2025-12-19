@@ -181,8 +181,8 @@ class External:
         )
 
 
-
 import ase.calculators.calculator as ase_calc
+
 
 class TMDNETCalculator(ase_calc.Calculator):
     """This is an adapter to use TorchMD-Net models as an ASE Calculator.
@@ -201,25 +201,26 @@ class TMDNETCalculator(ase_calc.Calculator):
         Extra arguments to pass to the model when loading it.
     """
 
-    implemented_properties = [
-        "energy",
-        "forces"
-    ]
+    implemented_properties = ["energy", "forces"]
 
     def __init__(
-        self,  model_file, device = 'cpu', dtype=torch.float32, compile=False, **kwargs,
+        self,
+        model_file,
+        device="cpu",
+        dtype=torch.float32,
+        compile=False,
+        **kwargs,
     ):
-        
-        
+
         ase_calc.Calculator.__init__(self)
-        self.device=device
+        self.device = device
         self.model = load_model(
             model_file,
             derivative=False,
-            remove_ref_energy = kwargs.get('remove_ref_energy', True),
-            max_num_neighbors = kwargs.get('max_num_neighbors', 64),
-            static_shapes = True if compile else False,
-            check_errors = False if compile else True,
+            remove_ref_energy=kwargs.get("remove_ref_energy", True),
+            max_num_neighbors=kwargs.get("max_num_neighbors", 64),
+            static_shapes=True if compile else False,
+            check_errors=False if compile else True,
             **kwargs,
         )
         for parameter in self.model.parameters():
@@ -228,40 +229,40 @@ class TMDNETCalculator(ase_calc.Calculator):
         self.model.to(device=self.device, dtype=dtype)
 
         if compile:
-            self.compile=True
+            self.compile = True
         else:
-            self.compile=False
-        
-        self.compiled=False
+            self.compile = False
+
+        self.compiled = False
 
         self.evals = 0
 
-
-
     def calculate(
         self,
-        atoms = None,
-        properties = None,
-        system_changes = ase_calc.all_changes,
+        atoms=None,
+        properties=None,
+        system_changes=ase_calc.all_changes,
     ):
-
 
         if not properties:
             properties = ["energy"]
-
 
         ase_calc.Calculator.calculate(self, atoms, properties, system_changes)
 
         numbers = atoms.numbers
 
         positions = atoms.positions
-        total_charge = atoms.info['charge']
+        total_charge = atoms.info["charge"]
         batch = [0 for _ in range(len(numbers))]
 
         batch = torch.tensor(batch, device=self.device, dtype=torch.long)
         numbers = torch.tensor(numbers, device=self.device, dtype=torch.long)
-        positions = torch.tensor(positions, device=self.device, dtype=torch.float32, requires_grad=True)
-        total_charge = torch.tensor([total_charge], device=self.device, dtype=torch.float32)
+        positions = torch.tensor(
+            positions, device=self.device, dtype=torch.float32, requires_grad=True
+        )
+        total_charge = torch.tensor(
+            [total_charge], device=self.device, dtype=torch.float32
+        )
 
         if self.compile and "numbers" in system_changes:
             if self.evals == 0:
@@ -269,33 +270,35 @@ class TMDNETCalculator(ase_calc.Calculator):
             else:
                 print("atomic numbers changed, re-compiling...")
 
-            
             self.model.representation_model.setup_for_compile_cudagraphs(batch)
             self.model.output_model.setup_for_compile_cudagraphs(batch)
             self.model.to(self.device)
-            self.compiled_model = torch.compile(self.model, backend='inductor', dynamic=False, fullgraph=True, mode='reduce-overhead')
+            self.compiled_model = torch.compile(
+                self.model,
+                backend="inductor",
+                dynamic=False,
+                fullgraph=True,
+                mode="reduce-overhead",
+            )
             self.compiled = True
-
 
         if self.compiled:
             energy, _ = self.compiled_model(
                 numbers, positions, batch=batch, q=total_charge
             )
         else:
-            energy, _ = self.model(
-                numbers, positions, batch=batch, q=total_charge
-            )
+            energy, _ = self.model(numbers, positions, batch=batch, q=total_charge)
 
         energy.backward()
         forces = -positions.grad
 
         self.results["energy"] = energy.detach().cpu().item()
         self.results["forces"] = forces.detach().cpu().numpy()
-        self.evals +=1 
+        self.evals += 1
 
 
 def optimize_geometries(model, z, pos, batch, q, interations=10):
-    """ function to opmize geometries using torch.optim"""
+    """function to opmize geometries using torch.optim"""
 
     pos = pos.clone().detach().requires_grad_(True)
     optimizer = torch.optim.LBFGS([pos])
@@ -304,7 +307,7 @@ def optimize_geometries(model, z, pos, batch, q, interations=10):
 
     def closure():
         optimizer.zero_grad()
-        energy,_ = model(z, pos, batch,q=q)
+        energy, _ = model(z, pos, batch, q=q)
 
         energies.append(energy.detach().cpu().numpy())
 
@@ -327,6 +330,7 @@ TIMEFACTOR = 48.88821
 BOLTZMAN = 0.001987191
 PICOSEC2TIMEU = 1000.0 / TIMEFACTOR
 
+
 def _first_VV(pos, vel, force, mass, dt):
     accel = force / mass
     pos += vel * dt + 0.5 * accel * dt * dt
@@ -344,10 +348,12 @@ def langevin(vel, gamma, coeff, dt, device):
 
 
 def batched_kinetic_energy(masses, vel, batch):
-    v_sq = torch.sum(vel ** 2, dim=1)
+    v_sq = torch.sum(vel**2, dim=1)
     E_per_node = 0.5 * masses.squeeze(-1) * v_sq
-    n_batch = int(torch.max(batch).item()+1)
-    Ekin = torch.zeros(n_batch, device=vel.device, dtype=vel.dtype).index_add(0, batch, E_per_node)
+    n_batch = int(torch.max(batch).item() + 1)
+    Ekin = torch.zeros(n_batch, device=vel.device, dtype=vel.dtype).index_add(
+        0, batch, E_per_node
+    )
     return Ekin
 
 
@@ -362,12 +368,32 @@ def kinetic_to_temp(Ekin, natoms):
 class BatchedMLIPIntegrator:
     """Batched Integrator for MLIP systems
 
-        modified from https://github.com/torchmd/torchmd
+    modified from https://github.com/torchmd/torchmd
     """
-    def __init__(self, model_file_path, z, pos, masses, batch, q, timestep, device='cuda', gamma=None, T=None):
+
+    def __init__(
+        self,
+        model_file_path,
+        z,
+        pos,
+        masses,
+        batch,
+        q,
+        timestep,
+        device="cuda",
+        gamma=None,
+        T=None,
+    ):
 
         # load the AceFF model
-        self.model = load_model(model_file_path, derivative=True, check_errors=True, static_shapes=False, max_num_neighbors=64, remove_ref_energy=True)
+        self.model = load_model(
+            model_file_path,
+            derivative=True,
+            check_errors=True,
+            static_shapes=False,
+            max_num_neighbors=64,
+            remove_ref_energy=True,
+        )
         for parameter in self.model.parameters():
             parameter.requires_grad = False
         self.model.to(device)
@@ -377,7 +403,7 @@ class BatchedMLIPIntegrator:
         self.batch = batch
         self.q = q
         self.box = None
-        self.device=device
+        self.device = device
         self.dt = timestep / TIMEFACTOR
         gamma = gamma / PICOSEC2TIMEU
         self.gamma = gamma
@@ -399,7 +425,7 @@ class BatchedMLIPIntegrator:
             pot, f = self.model(self.z, _pos, self.batch, q=self.q)
 
             self.forces = f.clone().detach()
-            
+
             if self.T:
                 langevin(self.vel, self.gamma, self.vcoeff, self.dt, self.device)
             _second_VV(self.vel, self.forces, self.M, self.dt)
@@ -407,5 +433,8 @@ class BatchedMLIPIntegrator:
         Ekin = batched_kinetic_energy(self.M, self.vel, self.batch)
         T = kinetic_to_temp(Ekin, self.n_atoms_per_batch)
 
-        return Ekin.detach().cpu().numpy(), pot.detach().squeeze(-1).cpu().numpy(), T.detach().cpu().numpy()
-
+        return (
+            Ekin.detach().cpu().numpy(),
+            pot.detach().squeeze(-1).cpu().numpy(),
+            T.detach().cpu().numpy(),
+        )
